@@ -1,0 +1,114 @@
+---
+sidebar_position: 9
+title: "Voice & TTS"
+description: "Text-to-speech and voice message transcription across all platforms"
+---
+
+# Voice & TTS
+
+Hermes Agent supports both text-to-speech output and voice message transcription across all messaging platforms.
+
+## Text-to-Speech
+
+Convert text to speech with three providers:
+
+| Provider | Quality | Cost | API Key |
+|----------|---------|------|---------|
+| **Edge TTS** (default) | Good | Free | None needed |
+| **ElevenLabs** | Excellent | Paid | `ELEVENLABS_API_KEY` |
+| **OpenAI TTS** | Good | Paid | `VOICE_TOOLS_OPENAI_KEY` |
+
+### Platform Delivery
+
+| Platform | Delivery | Format |
+|----------|----------|--------|
+| Telegram | Voice bubble (plays inline) | Opus `.ogg` |
+| Discord | Audio file attachment | MP3 |
+| WhatsApp | Audio file attachment | MP3 |
+| CLI | Saved to `~/.hermes/audio_cache/` | MP3 |
+
+### Configuration
+
+```yaml
+# In ~/.hermes/config.yaml
+tts:
+  provider: "edge"              # "edge" | "elevenlabs" | "openai"
+  edge:
+    voice: "en-US-AriaNeural"   # 322 voices, 74 languages
+  elevenlabs:
+    voice_id: "pNInz6obpgDQGcFmaJgB"  # Adam
+    model_id: "eleven_multilingual_v2"
+  openai:
+    model: "gpt-4o-mini-tts"
+    voice: "alloy"              # alloy, echo, fable, onyx, nova, shimmer
+```
+
+### Telegram Voice Bubbles & ffmpeg
+
+Telegram voice bubbles require Opus/OGG audio format:
+
+- **OpenAI and ElevenLabs** produce Opus natively — no extra setup
+- **Edge TTS** (default) outputs MP3 and needs **ffmpeg** to convert:
+
+```bash
+# Ubuntu/Debian
+sudo apt install ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Fedora
+sudo dnf install ffmpeg
+```
+
+Without ffmpeg, Edge TTS audio is sent as a regular audio file (playable, but shows as a rectangular player instead of a voice bubble).
+
+:::tip
+If you want voice bubbles without installing ffmpeg, switch to the OpenAI or ElevenLabs provider.
+:::
+
+## Voice Message Transcription (STT)
+
+Voice messages sent on Telegram, Discord, WhatsApp, Slack, or Signal are automatically transcribed and injected as text into the conversation. The agent sees the transcript as normal text.
+
+| Provider | Quality | Cost | API Key |
+|----------|---------|------|---------| 
+| **Local Whisper** (default) | Good | Free | None needed |
+| **OpenAI Whisper API** | Good–Best | Paid | `VOICE_TOOLS_OPENAI_KEY` |
+
+:::info Zero Config
+Local transcription works out of the box — no API key needed. The `faster-whisper` model (~150 MB for `base`) is auto-downloaded on first voice message.
+:::
+
+### Configuration
+
+```yaml
+# In ~/.hermes/config.yaml
+stt:
+  provider: "local"           # "local" (free, faster-whisper) | "openai" (API)
+  local:
+    model: "base"             # tiny, base, small, medium, large-v3
+  openai:
+    model: "whisper-1"        # whisper-1, gpt-4o-mini-transcribe, gpt-4o-transcribe
+```
+
+### Provider Details
+
+**Local (faster-whisper)** — Runs Whisper locally via [faster-whisper](https://github.com/SYSTRAN/faster-whisper). Uses CPU by default, GPU if available. Model sizes:
+
+| Model | Size | Speed | Quality |
+|-------|------|-------|---------|
+| `tiny` | ~75 MB | Fastest | Basic |
+| `base` | ~150 MB | Fast | Good (default) |
+| `small` | ~500 MB | Medium | Better |
+| `medium` | ~1.5 GB | Slower | Great |
+| `large-v3` | ~3 GB | Slowest | Best |
+
+**OpenAI API** — Requires `VOICE_TOOLS_OPENAI_KEY`. Supports `whisper-1`, `gpt-4o-mini-transcribe`, and `gpt-4o-transcribe`.
+
+### Fallback Behavior
+
+If your configured provider isn't available, Hermes automatically falls back:
+- **Local not installed** → Falls back to OpenAI API (if key is set)
+- **OpenAI key not set** → Falls back to local Whisper (if installed)
+- **Neither available** → Voice messages pass through with a note to the user
