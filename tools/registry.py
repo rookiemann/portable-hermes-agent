@@ -85,24 +85,58 @@ class ToolRegistry:
         """Return OpenAI-format tool schemas for the requested tool names.
 
         Only tools whose ``check_fn()`` returns True (or have no check_fn)
-        are included.
+        are included.  Runs all check_fn calls in parallel to avoid slow
+        sequential HTTP timeouts when services aren't running.
         """
-        result = []
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Separate tools with check_fn from those without
+        no_check = []
+        needs_check = []
         for name in sorted(tool_names):
             entry = self._tools.get(name)
             if not entry:
                 continue
             if entry.check_fn:
+                needs_check.append(entry)
+            else:
+                no_check.append(entry)
+
+        # Run all check_fn calls in parallel (max 2s per check → ~2s total)
+        check_results = {}  # name -> bool
+        if needs_check:
+            # Deduplicate check_fn by identity — many tools in a toolset
+            # share the same check_fn so we only call it once.
+            fn_to_names = {}
+            for entry in needs_check:
+                fn_id = id(entry.check_fn)
+                if fn_id not in fn_to_names:
+                    fn_to_names[fn_id] = (entry.check_fn, [])
+                fn_to_names[fn_id][1].append(entry.name)
+
+            def _run_check(fn, names):
                 try:
-                    if not entry.check_fn():
-                        if not quiet:
-                            logger.debug("Tool %s unavailable (check failed)", name)
-                        continue
+                    ok = fn()
                 except Exception:
-                    if not quiet:
-                        logger.debug("Tool %s check raised; skipping", name)
-                    continue
+                    ok = False
+                return names, ok
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [pool.submit(_run_check, fn, names)
+                           for fn, names in fn_to_names.values()]
+                for fut in as_completed(futures):
+                    names, ok = fut.result()
+                    for n in names:
+                        check_results[n] = ok
+
+        result = []
+        for entry in no_check:
             result.append({"type": "function", "function": entry.schema})
+        for entry in needs_check:
+            if check_results.get(entry.name, False):
+                result.append({"type": "function", "function": entry.schema})
+            elif not quiet:
+                logger.debug("Tool %s unavailable (check failed)", entry.name)
         return result
 
     # ------------------------------------------------------------------
