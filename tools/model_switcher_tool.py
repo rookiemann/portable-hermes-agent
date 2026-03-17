@@ -21,7 +21,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_FILE = _PROJECT_ROOT / ".env"
 
 def _detect_lmstudio_url() -> str:
-    """Use existing OPENAI_BASE_URL if it points to LM Studio, else default."""
+    """Use LM_STUDIO_BASE_URL or fall back to OPENAI_BASE_URL, else default."""
+    lms = os.environ.get("LM_STUDIO_BASE_URL", "").strip()
+    if lms:
+        url = lms.rstrip("/")
+        return url if url.endswith("/v1") else url + "/v1"
     current = os.environ.get("OPENAI_BASE_URL", "")
     if current and ("localhost" in current or "127.0.0.1" in current):
         return current.rstrip("/")

@@ -1010,6 +1010,8 @@ class HermesCLI:
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
         # show_reasoning: display model thinking/reasoning before the response
         self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", False)
+        # stream_thinking: show thinking tokens streaming in real-time for visual feedback
+        self.stream_thinking = CLI_CONFIG["display"].get("stream_thinking", False)
         self.verbose = verbose if verbose is not None else (self.tool_progress_mode == "verbose")
         
         # Configuration - priority: CLI args > env vars > config file
@@ -1432,6 +1434,7 @@ class HermesCLI:
                 honcho_session_key=None,  # resolved by run_agent via config sessions map / title
                 fallback_model=self._fallback_model,
                 thinking_callback=self._on_thinking,
+                stream_thinking=self.stream_thinking,
                 checkpoints_enabled=self.checkpoints_enabled,
                 checkpoint_max_snapshots=self.checkpoint_max_snapshots,
                 pass_session_id=self.pass_session_id,
@@ -3315,9 +3318,11 @@ class HermesCLI:
             else:
                 level = rc.get("effort", "medium")
             display_state = "on ✓" if self.show_reasoning else "off"
+            stream_state = "on ✓" if self.stream_thinking else "off"
             _cprint(f"  {_GOLD}Reasoning effort:  {level}{_RST}")
             _cprint(f"  {_GOLD}Reasoning display: {display_state}{_RST}")
-            _cprint(f"  {_DIM}Usage: /reasoning <none|low|medium|high|xhigh|show|hide>{_RST}")
+            _cprint(f"  {_GOLD}Stream thinking:   {stream_state}{_RST}")
+            _cprint(f"  {_DIM}Usage: /reasoning <none|low|medium|high|xhigh|show|hide|stream>{_RST}")
             return
 
         arg = parts[1].strip().lower()
@@ -3337,6 +3342,16 @@ class HermesCLI:
                 self.agent.reasoning_callback = None
             save_config_value("display.show_reasoning", False)
             _cprint(f"  {_GOLD}✓ Reasoning display: OFF (saved){_RST}")
+            return
+        if arg == "stream":
+            self.stream_thinking = not self.stream_thinking
+            if self.agent:
+                self.agent.stream_thinking = self.stream_thinking
+            save_config_value("display.stream_thinking", self.stream_thinking)
+            state = "ON" if self.stream_thinking else "OFF"
+            _cprint(f"  {_GOLD}✓ Stream thinking: {state} (saved){_RST}")
+            if self.stream_thinking:
+                _cprint(f"  {_DIM}  Thinking tokens will stream live during model reasoning.{_RST}")
             return
 
         # Effort level change

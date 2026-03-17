@@ -266,6 +266,7 @@ class AIAgent:
         tool_progress_callback: callable = None,
         thinking_callback: callable = None,
         reasoning_callback: callable = None,
+        stream_thinking: bool = False,
         clarify_callback: callable = None,
         step_callback: callable = None,
         max_tokens: int = None,
@@ -365,6 +366,7 @@ class AIAgent:
         self.tool_progress_callback = tool_progress_callback
         self.thinking_callback = thinking_callback
         self.reasoning_callback = reasoning_callback
+        self.stream_thinking = stream_thinking
         self.clarify_callback = clarify_callback
         self.step_callback = step_callback
         self._last_reported_tool = None  # Track for "new tool" mode
@@ -2804,6 +2806,194 @@ class AIAgent:
             raise result["error"]
         return result["response"]
 
+    def _streaming_thinking_api_call(self, api_kwargs: dict):
+        """Stream API call that forwards thinking/reasoning tokens in real-time.
+
+        Uses ``stream=True`` and pipes thinking deltas through
+        ``self.thinking_callback`` so users get live visual feedback while the
+        model reasons.  Content and tool_call deltas are accumulated silently
+        and returned as a normal response object.
+
+        Supports both chat_completions (OpenAI-format reasoning deltas) and
+        anthropic_messages (thinking block deltas).
+        """
+        result = {"response": None, "error": None}
+        request_client_holder = {"client": None}
+        thinking_buf = []
+
+        def _emit_thinking(token: str):
+            """Forward a thinking token to the spinner/TUI."""
+            thinking_buf.append(token)
+            if self.thinking_callback:
+                # Show the last ~120 chars of thinking as a rolling window
+                full = "".join(thinking_buf)
+                snippet = full[-120:].replace("\n", " ")
+                if len(full) > 120:
+                    snippet = "..." + snippet
+                self.thinking_callback(f"thinking: {snippet}")
+
+        def _call_chat_completions():
+            try:
+                stream_kwargs = {**api_kwargs, "stream": True}
+                request_client_holder["client"] = self._create_request_openai_client(
+                    reason="thinking_stream_request"
+                )
+                stream = request_client_holder["client"].chat.completions.create(**stream_kwargs)
+
+                content_parts: list[str] = []
+                reasoning_parts: list[str] = []
+                tool_calls_acc: dict[int, dict] = {}
+                finish_reason = None
+                model_name = None
+
+                for chunk in stream:
+                    if not chunk.choices:
+                        if hasattr(chunk, "model") and chunk.model:
+                            model_name = chunk.model
+                        continue
+
+                    delta = chunk.choices[0].delta
+                    if hasattr(chunk, "model") and chunk.model:
+                        model_name = chunk.model
+
+                    # Thinking/reasoning deltas (DeepSeek, Qwen, OpenRouter)
+                    reasoning_token = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                    if reasoning_token:
+                        reasoning_parts.append(reasoning_token)
+                        _emit_thinking(reasoning_token)
+
+                    # Content deltas
+                    if delta and delta.content:
+                        content_parts.append(delta.content)
+
+                    # Tool call deltas
+                    if delta and delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            idx = tc_delta.index if tc_delta.index is not None else 0
+                            if idx not in tool_calls_acc:
+                                tool_calls_acc[idx] = {
+                                    "id": tc_delta.id or "",
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            entry = tool_calls_acc[idx]
+                            if tc_delta.id:
+                                entry["id"] = tc_delta.id
+                            if tc_delta.function:
+                                if tc_delta.function.name:
+                                    entry["function"]["name"] += tc_delta.function.name
+                                if tc_delta.function.arguments:
+                                    entry["function"]["arguments"] += tc_delta.function.arguments
+
+                    if chunk.choices[0].finish_reason:
+                        finish_reason = chunk.choices[0].finish_reason
+
+                full_content = "".join(content_parts) or None
+                full_reasoning = "".join(reasoning_parts) or None
+                mock_tool_calls = None
+                if tool_calls_acc:
+                    mock_tool_calls = []
+                    for idx in sorted(tool_calls_acc):
+                        tc = tool_calls_acc[idx]
+                        mock_tool_calls.append(SimpleNamespace(
+                            id=tc["id"],
+                            type=tc["type"],
+                            function=SimpleNamespace(
+                                name=tc["function"]["name"],
+                                arguments=tc["function"]["arguments"],
+                            ),
+                        ))
+
+                mock_message = SimpleNamespace(
+                    role="assistant",
+                    content=full_content,
+                    tool_calls=mock_tool_calls,
+                    reasoning_content=full_reasoning,
+                    reasoning=full_reasoning,
+                    reasoning_details=None,
+                )
+                mock_choice = SimpleNamespace(
+                    index=0,
+                    message=mock_message,
+                    finish_reason=finish_reason or "stop",
+                )
+                result["response"] = SimpleNamespace(
+                    id="stream-" + str(uuid.uuid4()),
+                    model=model_name,
+                    choices=[mock_choice],
+                    usage=None,
+                )
+            except Exception as e:
+                result["error"] = e
+            finally:
+                request_client = request_client_holder.get("client")
+                if request_client is not None:
+                    self._close_request_openai_client(request_client, reason="thinking_stream_complete")
+
+        def _call_anthropic():
+            try:
+                with self._anthropic_client.messages.stream(**api_kwargs) as stream:
+                    text_parts = []
+                    reasoning_parts_a = []
+                    tool_calls_a = []
+                    current_block_type = None
+
+                    for event in stream:
+                        etype = getattr(event, "type", "")
+                        if etype == "content_block_start":
+                            block = getattr(event, "content_block", None)
+                            current_block_type = getattr(block, "type", None)
+                        elif etype == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            delta_type = getattr(delta, "type", "")
+                            if delta_type == "thinking_delta":
+                                token = getattr(delta, "thinking", "")
+                                if token:
+                                    reasoning_parts_a.append(token)
+                                    _emit_thinking(token)
+                            elif delta_type == "text_delta":
+                                token = getattr(delta, "text", "")
+                                if token:
+                                    text_parts.append(token)
+                        elif etype == "content_block_stop":
+                            current_block_type = None
+
+                    # Get the final message from the stream
+                    final = stream.get_final_message()
+                    result["response"] = final
+            except Exception as e:
+                result["error"] = e
+
+        def _call():
+            if self.api_mode == "anthropic_messages":
+                _call_anthropic()
+            else:
+                _call_chat_completions()
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+        while t.is_alive():
+            t.join(timeout=0.3)
+            if self._interrupt_requested:
+                try:
+                    if self.api_mode == "anthropic_messages":
+                        from agent.anthropic_adapter import build_anthropic_client
+                        self._anthropic_client.close()
+                        self._anthropic_client = build_anthropic_client(
+                            self._anthropic_api_key,
+                            getattr(self, "_anthropic_base_url", None),
+                        )
+                    else:
+                        request_client = request_client_holder.get("client")
+                        if request_client is not None:
+                            self._close_request_openai_client(request_client, reason="thinking_stream_interrupt")
+                except Exception:
+                    pass
+                raise InterruptedError("Agent interrupted during API call")
+        if result["error"] is not None:
+            raise result["error"]
+        return result["response"]
+
     def _streaming_api_call(self, api_kwargs: dict, stream_callback):
         """Streaming variant of _interruptible_api_call for voice TTS pipeline.
 
@@ -4766,6 +4956,8 @@ class AIAgent:
                     cb = getattr(self, "_stream_callback", None)
                     if cb is not None and self.api_mode == "chat_completions":
                         response = self._streaming_api_call(api_kwargs, cb)
+                    elif self.stream_thinking and cb is None:
+                        response = self._streaming_thinking_api_call(api_kwargs)
                     else:
                         response = self._interruptible_api_call(api_kwargs)
                         # Forward full response to TTS callback for non-streaming providers

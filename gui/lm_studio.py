@@ -229,12 +229,56 @@ class LMStudioPanel(tk.Toplevel):
         from gui.theme import center_window
         center_window(self, 650, 580, parent)
 
-        self.client = LMStudioClient()
+        # Read configured endpoint from environment or .env file
+        base_url = self._resolve_base_url()
+        self.client = LMStudioClient(base_url=base_url)
         self.gpus = get_available_gpus()
         self.models = []
 
         self._build_ui()
         self.after(100, self._connect)
+
+    @staticmethod
+    def _resolve_base_url() -> str:
+        """Read LM Studio URL from environment or .env file, fall back to default.
+
+        Priority: LM_STUDIO_BASE_URL > OPENAI_BASE_URL > default (port 1234).
+        """
+        default = "http://localhost:1234/v1"
+
+        # Check dedicated LM Studio var first, then OPENAI_BASE_URL
+        env_url = os.environ.get("LM_STUDIO_BASE_URL", "").strip()
+        if not env_url:
+            env_url = os.environ.get("OPENAI_BASE_URL", "")
+
+        # If not in environment, try reading from .env file
+        if not env_url:
+            env_path = PROJECT_ROOT / ".env"
+            if env_path.exists():
+                try:
+                    for line in env_path.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if line.startswith("LM_STUDIO_BASE_URL=") and not line.startswith("#"):
+                            env_url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+                    if not env_url:
+                        for line in env_path.read_text(encoding="utf-8").splitlines():
+                            line = line.strip()
+                            if line.startswith("OPENAI_BASE_URL=") and not line.startswith("#"):
+                                env_url = line.split("=", 1)[1].strip().strip('"').strip("'")
+                                break
+                except Exception:
+                    pass
+
+        if not env_url:
+            return default
+
+        # Skip non-local URLs (e.g. OpenRouter) — those aren't LM Studio
+        if "openrouter.ai" in env_url or "api.openai.com" in env_url:
+            return default
+
+        # Return the URL as configured (strip trailing slash for consistency)
+        return env_url.rstrip("/")
 
     def _build_ui(self):
         # Title

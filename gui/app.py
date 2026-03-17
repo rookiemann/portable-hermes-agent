@@ -920,9 +920,8 @@ class HermesGUI:
                                   fg=C["text_primary"], bg=C["bg_sidebar"])
         self.chat_title.pack(side="left", padx=16)
 
-        self.stop_btn = ttk.Button(hdr, text="Stop", style="Danger.TButton",
-                                   command=self._interrupt)
-        self.stop_btn.pack(side="right", padx=16)  # Always visible
+        # Stop button is created here but packed in the input area (next to Send)
+        # so it doesn't overlap the chat. See btn_frame below.
 
         # Messages scroll area
         msg_outer = tk.Frame(chat_area, bg=C["bg_main"])
@@ -968,20 +967,26 @@ class HermesGUI:
                                  padx=12, pady=8, insertbackground=C["text_primary"],
                                  selectbackground=C["accent"], selectforeground="white",
                                  highlightthickness=0)
-        self.input_text.pack(fill="x", side="left", expand=True)
+        self.input_text.pack(fill="both", expand=True)
 
-        btn_frame = tk.Frame(inp_card, bg=C["bg_input"])
-        btn_frame.pack(side="right", padx=4, pady=4)
+        # Button row below the text input, separate from the text card
+        btn_row = tk.Frame(inp_outer, bg=C["bg_sidebar"])
+        btn_row.pack(fill="x", pady=(6, 0))
 
-        attach_btn = ttk.Button(btn_frame, text="\U0001f4ce", width=3,
+        attach_btn = ttk.Button(btn_row, text="\U0001f4ce Attach", width=8,
                                command=self._attach_image)
-        attach_btn.pack(pady=(0, 4))
+        attach_btn.pack(side="left", padx=(0, 4))
         Tooltip(attach_btn, "Attach image (Ctrl+Shift+I)")
 
-        send_btn = ttk.Button(btn_frame, text="Send", style="Primary.TButton",
+        send_btn = ttk.Button(btn_row, text="Send", style="Primary.TButton",
                              command=self._send)
-        send_btn.pack()
+        send_btn.pack(side="right", padx=(4, 0))
         Tooltip(send_btn, "Send message (Enter)")
+
+        self.stop_btn = ttk.Button(btn_row, text="Stop", style="Danger.TButton",
+                                   command=self._interrupt)
+        self.stop_btn.pack(side="right", padx=(4, 0))
+        Tooltip(self.stop_btn, "Stop generation (Escape)")
 
         self.root.bind("<Control-Shift-I>", lambda e: self._attach_image())
 

@@ -24,11 +24,19 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_lms_base() -> str:
-    """Derive LM Studio base URL from OPENAI_BASE_URL env var or default."""
+    """Derive LM Studio base URL from env vars or default.
+
+    Priority: LM_STUDIO_BASE_URL > OPENAI_BASE_URL > http://localhost:1234
+    LM_STUDIO_BASE_URL is preferred because OPENAI_BASE_URL may point to
+    another service (e.g. a local TTS server on port 8100).
+    """
     import os
-    base = os.environ.get("OPENAI_BASE_URL", "").strip().rstrip("/")
+    # Prefer dedicated LM Studio var to avoid conflicts with other services
+    base = os.environ.get("LM_STUDIO_BASE_URL", "").strip().rstrip("/")
+    if not base:
+        base = os.environ.get("OPENAI_BASE_URL", "").strip().rstrip("/")
     if base:
-        # Strip /v1 suffix to get the base (e.g. http://127.0.0.1:8100)
+        # Strip /v1 suffix to get the base
         if base.endswith("/v1"):
             return base[:-3]
         return base
