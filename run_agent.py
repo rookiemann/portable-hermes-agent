@@ -2825,20 +2825,35 @@ class AIAgent:
             """Forward a thinking token to the spinner/TUI."""
             thinking_buf.append(token)
             if self.thinking_callback:
-                # Show the last ~120 chars of thinking as a rolling window
+                # Show the last ~150 chars of thinking as a rolling window
                 full = "".join(thinking_buf)
-                snippet = full[-120:].replace("\n", " ")
-                if len(full) > 120:
+                snippet = full[-150:].replace("\n", " ").strip()
+                if len(full) > 150:
                     snippet = "..." + snippet
-                self.thinking_callback(f"thinking: {snippet}")
+                self.thinking_callback(f"\U0001f4ad {snippet}")
 
         def _call_chat_completions():
+            """Stream via raw httpx SSE so we can read custom fields like
+            ``reasoning_content`` and ``reasoning`` that the OpenAI SDK
+            silently drops from delta objects."""
+            import httpx as _httpx
+
             try:
-                stream_kwargs = {**api_kwargs, "stream": True}
-                request_client_holder["client"] = self._create_request_openai_client(
-                    reason="thinking_stream_request"
-                )
-                stream = request_client_holder["client"].chat.completions.create(**stream_kwargs)
+                # Build the HTTP request from api_kwargs
+                base_url = str(self.client.base_url).rstrip("/")
+                url = f"{base_url}/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.client.api_key}",
+                }
+                # Forward extra headers (OpenRouter site URL, referer, etc.)
+                if hasattr(self.client, "_custom_headers"):
+                    headers.update(self.client._custom_headers)
+                default_hdrs = getattr(self.client, "default_headers", {})
+                if default_hdrs:
+                    headers.update(default_hdrs)
+
+                body = {**api_kwargs, "stream": True}
 
                 content_parts: list[str] = []
                 reasoning_parts: list[str] = []
@@ -2846,47 +2861,85 @@ class AIAgent:
                 finish_reason = None
                 model_name = None
 
-                for chunk in stream:
-                    if not chunk.choices:
-                        if hasattr(chunk, "model") and chunk.model:
-                            model_name = chunk.model
-                        continue
+                with _httpx.Client(timeout=300) as http:
+                    with http.stream("POST", url, json=body, headers=headers) as resp:
+                        resp.raise_for_status()
+                        buf = ""
+                        for raw_line in resp.iter_lines():
+                            line = raw_line.strip()
+                            if not line or line == "data: [DONE]":
+                                continue
+                            if line.startswith("data: "):
+                                line = line[6:]
+                            try:
+                                chunk = json.loads(line)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
 
-                    delta = chunk.choices[0].delta
-                    if hasattr(chunk, "model") and chunk.model:
-                        model_name = chunk.model
+                            if chunk.get("model"):
+                                model_name = chunk["model"]
 
-                    # Thinking/reasoning deltas (DeepSeek, Qwen, OpenRouter)
-                    reasoning_token = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
-                    if reasoning_token:
-                        reasoning_parts.append(reasoning_token)
-                        _emit_thinking(reasoning_token)
+                            choices = chunk.get("choices", [])
+                            if not choices:
+                                continue
 
-                    # Content deltas
-                    if delta and delta.content:
-                        content_parts.append(delta.content)
+                            choice = choices[0]
+                            delta = choice.get("delta", {})
 
-                    # Tool call deltas
-                    if delta and delta.tool_calls:
-                        for tc_delta in delta.tool_calls:
-                            idx = tc_delta.index if tc_delta.index is not None else 0
-                            if idx not in tool_calls_acc:
-                                tool_calls_acc[idx] = {
-                                    "id": tc_delta.id or "",
-                                    "type": "function",
-                                    "function": {"name": "", "arguments": ""},
-                                }
-                            entry = tool_calls_acc[idx]
-                            if tc_delta.id:
-                                entry["id"] = tc_delta.id
-                            if tc_delta.function:
-                                if tc_delta.function.name:
-                                    entry["function"]["name"] += tc_delta.function.name
-                                if tc_delta.function.arguments:
-                                    entry["function"]["arguments"] += tc_delta.function.arguments
+                            # Reasoning tokens — custom fields that the
+                            # OpenAI SDK would normally discard
+                            r_token = (
+                                delta.get("reasoning_content")
+                                or delta.get("reasoning")
+                                or ""
+                            )
+                            if r_token:
+                                reasoning_parts.append(r_token)
+                                _emit_thinking(r_token)
 
-                    if chunk.choices[0].finish_reason:
-                        finish_reason = chunk.choices[0].finish_reason
+                            # Inline <think> blocks in content stream
+                            c_token = delta.get("content") or ""
+                            if c_token:
+                                buf += c_token
+                                # Detect <think>...</think> as they stream in
+                                while "<think>" in buf and "</think>" in buf:
+                                    start = buf.index("<think>")
+                                    end = buf.index("</think>") + len("</think>")
+                                    think_text = buf[start + 7:end - 8]
+                                    if think_text.strip():
+                                        reasoning_parts.append(think_text)
+                                        _emit_thinking(think_text)
+                                    buf = buf[:start] + buf[end:]
+                                # Flush confirmed non-think content
+                                if "<think>" not in buf:
+                                    if buf:
+                                        content_parts.append(buf)
+                                    buf = ""
+
+                            # Tool call deltas
+                            for tc_delta in delta.get("tool_calls", []):
+                                idx = tc_delta.get("index", 0)
+                                if idx not in tool_calls_acc:
+                                    tool_calls_acc[idx] = {
+                                        "id": tc_delta.get("id", ""),
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""},
+                                    }
+                                entry = tool_calls_acc[idx]
+                                if tc_delta.get("id"):
+                                    entry["id"] = tc_delta["id"]
+                                fn = tc_delta.get("function", {})
+                                if fn.get("name"):
+                                    entry["function"]["name"] += fn["name"]
+                                if fn.get("arguments"):
+                                    entry["function"]["arguments"] += fn["arguments"]
+
+                            if choice.get("finish_reason"):
+                                finish_reason = choice["finish_reason"]
+
+                        # Flush any remaining buffered content
+                        if buf:
+                            content_parts.append(buf)
 
                 full_content = "".join(content_parts) or None
                 full_reasoning = "".join(reasoning_parts) or None
@@ -2925,10 +2978,6 @@ class AIAgent:
                 )
             except Exception as e:
                 result["error"] = e
-            finally:
-                request_client = request_client_holder.get("client")
-                if request_client is not None:
-                    self._close_request_openai_client(request_client, reason="thinking_stream_complete")
 
         def _call_anthropic():
             try:
