@@ -157,8 +157,10 @@ class AgentBridge:
         # Only disable what's truly broken on Windows
         disabled = ["code_execution"]
 
-        # Support LM Studio custom base URL
-        base_url = self._lm_studio_base_url or os.getenv("OPENAI_BASE_URL") or None
+        # Support LM Studio custom base URL — only when explicitly set by the
+        # GUI's LM Studio panel, NOT from OPENAI_BASE_URL env var (which may
+        # point to a local service like TTS or LM Studio on port 8100).
+        base_url = self._lm_studio_base_url or None
 
         # Generate session ID
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
