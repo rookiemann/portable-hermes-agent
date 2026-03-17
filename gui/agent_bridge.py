@@ -657,7 +657,20 @@ You are running on **{os_name} {os_release}**.
         return "\n\n".join(response_parts)
 
     def _run_agent(self, message: str, image_paths: list = None):
+        # Breadcrumb log for debugging stuck-on-thinking issues
+        _dbg_path = os.path.join(str(PROJECT_ROOT), "agent_debug.log")
+        def _dbg(msg):
+            try:
+                with open(_dbg_path, "a", encoding="utf-8") as f:
+                    import datetime
+                    f.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
+            except Exception:
+                pass
+
+        _dbg(f"_run_agent START message={message[:50]!r}")
+
         # Check if model is configured — if not, use guided mode
+        _dbg(f"checking _is_model_configured (api_key={bool(self.get_api_key())})...")
         if not self._is_model_configured():
             try:
                 response = self._guided_response(message)
@@ -675,8 +688,11 @@ You are running on **{os_name} {os_release}**.
 
         try:
             if self.agent is None:
+                _dbg("creating agent...")
                 self._create_agent()
+                _dbg(f"agent created: api_mode={self.agent.api_mode}, base_url={self.agent.base_url[:50]}, stream_thinking={self.agent.stream_thinking}")
 
+            _dbg("calling run_conversation...")
             # Build user message content — multimodal if images attached
             if image_paths:
                 content_parts = [{"type": "text", "text": message}]
@@ -695,6 +711,7 @@ You are running on **{os_name} {os_release}**.
                 user_message=user_content,
                 conversation_history=self.conversation_history,
             )
+            _dbg(f"run_conversation returned, response length={len(result.get('final_response',''))}")
 
             final_response = result.get("final_response", "")
             messages = result.get("messages", [])
@@ -704,7 +721,9 @@ You are running on **{os_name} {os_release}**.
             self._post(self.on_complete, result)
 
         except Exception as e:
+            _dbg(f"EXCEPTION: {e}")
             error_msg = f"Error: {e}\n{traceback.format_exc()}"
+            _dbg(f"traceback: {traceback.format_exc()[:500]}")
             self._post(self.on_error, error_msg)
         finally:
             self.is_running = False
