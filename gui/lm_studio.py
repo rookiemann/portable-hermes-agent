@@ -148,18 +148,40 @@ class LMStudioClient:
         return []
 
     def load_model(self, model_path: str, gpu_index: Optional[int] = None,
-                   context_length: int = 4096) -> bool:
-        """Load a model via SDK with GPU and context control."""
+                   context_length: int = 4096, flash_attention: bool = True) -> bool:
+        """Load a model via SDK with GPU and context control.
+
+        If the model is already loaded, skips loading. Uses disabled_gpus
+        to force a single GPU when gpu_index is specified.
+        """
         if not self._sdk_client:
             return False
         try:
+            # Unload all existing instances to ensure clean GPU placement.
+            # JIT-loaded models ignore GPU settings, so we must always
+            # unload and reload via SDK for correct single-GPU loading.
+            try:
+                loaded = list(self._sdk_client.llm.list_loaded())
+                for m in loaded:
+                    try:
+                        m.unload()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             gpu_config = None
             if gpu_index is not None:
                 gpus = get_available_gpus()
                 num_gpus = len([g for g in gpus if g.startswith("GPU")])
-                disabled = [i for i in range(num_gpus) if i != gpu_index]
+                # LM Studio uses reversed GPU ordering vs nvidia-smi:
+                #   nvidia-smi GPU 0 = LM Studio GPU (n-1)
+                #   nvidia-smi GPU 1 = LM Studio GPU (n-2), etc.
+                # Remap so the user's selection (nvidia-smi order) works correctly.
+                lms_index = (num_gpus - 1) - gpu_index
+                disabled = [i for i in range(num_gpus) if i != lms_index]
                 gpu_config = GpuSetting(
-                    main_gpu=gpu_index,
+                    main_gpu=lms_index,
                     disabled_gpus=disabled if disabled else None,
                     ratio=1.0,
                 )
@@ -167,11 +189,12 @@ class LMStudioClient:
             config = LlmLoadModelConfig(
                 gpu=gpu_config,
                 context_length=context_length,
+                flash_attention=flash_attention,
             )
 
             instance_id = f"hermes-{int(time.time())}"
             self._sdk_client.llm.load_new_instance(
-                model_path, instance_id, config=config, ttl=3600
+                model_path, instance_id, config=config, ttl=86400
             )
             return True
         except Exception as e:

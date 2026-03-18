@@ -12,6 +12,7 @@ from tkinter import ttk, messagebox, simpledialog
 import threading
 from pathlib import Path
 from datetime import datetime
+from typing import List, Dict, Optional
 
 try:
     from PIL import Image, ImageTk
@@ -291,13 +292,22 @@ class Sidebar(tk.Frame):
     ]
 
     def __init__(self, parent, on_new=None, on_model_change=None,
-                 on_session_select=None, **kw):
+                 on_session_select=None, on_local_models=None,
+                 on_auto_load=None, **kw):
         super().__init__(parent, bg=C["bg_sidebar"], width=260, **kw)
         self.pack_propagate(False)
         self.on_new = on_new
         self.on_model_change = on_model_change
         self.on_session_select = on_session_select
+        self.on_local_models = on_local_models  # callback(list_of_model_ids)
+        self.on_auto_load = on_auto_load  # callback(model_id, gpu, ctx, settings)
         self._confirm_delete = True  # Show confirmation dialog
+        self._loading_model = False  # True while auto-loading
+
+        # Unified model list: cloud + local
+        self._lm_studio_models: List[tuple] = []  # [(id, name, note), ...]
+        self._all_models: List[tuple] = list(self.MODELS)
+        self._model_states: Dict[str, str] = {}  # model_id -> "loaded"/"not-loaded"
 
         # -- Logo --
         logo_fr = tk.Frame(self, bg=C["bg_sidebar"], pady=16, padx=16)
@@ -322,22 +332,31 @@ class Sidebar(tk.Frame):
                 fg=C["text_hint"], bg=C["bg_sidebar"]).pack(anchor="w")
 
         self.model_var = tk.StringVar(value=os.getenv("LLM_MODEL", "google/gemini-2.5-flash"))
-        display_values = [f"{name}  ({note})" for _, name, note in self.MODELS]
+        display_values = [self._display_name(m) for m in self._all_models]
         self.model_combo = ttk.Combobox(model_fr, textvariable=tk.StringVar(),
                                         values=display_values,
                                         font=FONTS["small"], state="readonly")
-        # Set current selection
         current_model = self.model_var.get()
-        for i, (model_id, _, _) in enumerate(self.MODELS):
-            if model_id == current_model:
-                self.model_combo.current(i)
-                break
-        else:
-            # Custom model not in list — show raw ID
-            self.model_combo.set(current_model)
+        self._select_model_in_combo(current_model)
 
-        self.model_combo.pack(fill="x", pady=(2, 8))
+        self.model_combo.pack(fill="x", pady=(2, 4))
         self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)
+        self.model_combo.bind("<Button-1>", lambda e: self.refresh_models())
+
+        # -- Loading status indicator (hidden by default) --
+        self._load_status_var = tk.StringVar(value="")
+        self._load_status_lbl = tk.Label(model_fr, textvariable=self._load_status_var,
+                                         font=FONTS["small"], fg=C["warning"],
+                                         bg=C["bg_sidebar"], anchor="w")
+        # Don't pack yet — shown/hidden dynamically
+
+        # -- Local Model Settings (collapsible) --
+        self._local_settings_fr = tk.Frame(self, bg=C["bg_sidebar"], padx=16)
+        # Don't pack yet — shown when a local model is selected
+        self._build_local_settings(self._local_settings_fr)
+
+        # Probe LM Studio models in background after startup
+        self.after(1000, self.refresh_models)
 
         ttk.Separator(self, orient="horizontal").pack(fill="x")
 
@@ -368,13 +387,254 @@ class Sidebar(tk.Frame):
         # Load sessions on startup
         self.after(500, self._load_sessions)
 
-    def set_model(self, name):
-        self.model_var.set(name)
-        for i, (model_id, _, _) in enumerate(self.MODELS):
-            if model_id == name:
+    @staticmethod
+    def _display_name(entry):
+        """Build display string for a model tuple (id, name, note)."""
+        _, name, note = entry
+        return f"{name}  ({note})"
+
+    def _select_model_in_combo(self, model_id):
+        """Select model_id in the combobox, or show raw ID if not found."""
+        for i, (mid, _, _) in enumerate(self._all_models):
+            if mid == model_id:
                 self.model_combo.current(i)
                 return
-        self.model_combo.set(name)
+        self.model_combo.set(model_id)
+
+    def set_model(self, name):
+        self.model_var.set(name)
+        self._select_model_in_combo(name)
+
+    def _update_combobox_values(self):
+        """Rebuild combobox values from _all_models (must be called on main thread)."""
+        current = self.model_var.get()
+        display_values = [self._display_name(m) for m in self._all_models]
+        self.model_combo["values"] = display_values
+        self._select_model_in_combo(current)
+
+    def _build_local_settings(self, parent):
+        """Build the compact local model settings panel."""
+        # Load persisted settings from env
+        _hermes_home = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
+
+        # Header
+        tk.Label(parent, text="Local Model Settings", font=FONTS["small"],
+                fg=C["accent"], bg=C["bg_sidebar"]).pack(anchor="w", pady=(4, 2))
+
+        # GPU selector
+        gpu_row = tk.Frame(parent, bg=C["bg_sidebar"])
+        gpu_row.pack(fill="x", pady=2)
+        tk.Label(gpu_row, text="GPU:", font=FONTS["small"],
+                fg=C["text_hint"], bg=C["bg_sidebar"], width=6, anchor="w").pack(side="left")
+        self._gpu_var = tk.StringVar(value=os.getenv("LM_STUDIO_GPU", ""))
+        self._gpu_combo = ttk.Combobox(gpu_row, textvariable=self._gpu_var,
+                                        font=FONTS["small"], state="readonly", width=22)
+        self._gpu_combo.pack(side="left", fill="x", expand=True)
+        self._gpu_combo.bind("<<ComboboxSelected>>", lambda e: self._save_local_settings())
+
+        # Detect GPUs in background
+        def _detect_gpus():
+            try:
+                from gui.lm_studio import get_available_gpus
+                gpus = get_available_gpus()
+            except Exception:
+                gpus = ["CPU"]
+            try:
+                self.after(0, lambda: self._populate_gpus(gpus))
+            except Exception:
+                pass
+        threading.Thread(target=_detect_gpus, daemon=True).start()
+
+        # Context length
+        ctx_row = tk.Frame(parent, bg=C["bg_sidebar"])
+        ctx_row.pack(fill="x", pady=2)
+        tk.Label(ctx_row, text="Ctx:", font=FONTS["small"],
+                fg=C["text_hint"], bg=C["bg_sidebar"], width=6, anchor="w").pack(side="left")
+        self._ctx_var = tk.IntVar(value=int(os.getenv("LM_STUDIO_CTX", "32768")))
+        ctx_spin = ttk.Spinbox(ctx_row, from_=512, to=131072, increment=512,
+                               textvariable=self._ctx_var, font=FONTS["small"], width=8)
+        ctx_spin.pack(side="left")
+        ctx_spin.bind("<FocusOut>", lambda e: self._save_local_settings())
+        ctx_spin.bind("<Return>", lambda e: self._save_local_settings())
+        tk.Label(ctx_row, text="tokens", font=FONTS["small"],
+                fg=C["text_disabled"], bg=C["bg_sidebar"]).pack(side="left", padx=(4, 0))
+
+        # Temperature
+        temp_row = tk.Frame(parent, bg=C["bg_sidebar"])
+        temp_row.pack(fill="x", pady=2)
+        tk.Label(temp_row, text="Temp:", font=FONTS["small"],
+                fg=C["text_hint"], bg=C["bg_sidebar"], width=6, anchor="w").pack(side="left")
+        self._temp_var = tk.DoubleVar(value=float(os.getenv("LM_STUDIO_TEMP", "0.7")))
+        temp_spin = ttk.Spinbox(temp_row, from_=0.0, to=2.0, increment=0.1,
+                                textvariable=self._temp_var, font=FONTS["small"], width=8,
+                                format="%.1f")
+        temp_spin.pack(side="left")
+        temp_spin.bind("<FocusOut>", lambda e: self._save_local_settings())
+        temp_spin.bind("<Return>", lambda e: self._save_local_settings())
+
+        # Top-P
+        topp_row = tk.Frame(parent, bg=C["bg_sidebar"])
+        topp_row.pack(fill="x", pady=2)
+        tk.Label(topp_row, text="Top-P:", font=FONTS["small"],
+                fg=C["text_hint"], bg=C["bg_sidebar"], width=6, anchor="w").pack(side="left")
+        self._topp_var = tk.DoubleVar(value=float(os.getenv("LM_STUDIO_TOP_P", "0.9")))
+        topp_spin = ttk.Spinbox(topp_row, from_=0.0, to=1.0, increment=0.05,
+                                textvariable=self._topp_var, font=FONTS["small"], width=8,
+                                format="%.2f")
+        topp_spin.pack(side="left")
+        topp_spin.bind("<FocusOut>", lambda e: self._save_local_settings())
+        topp_spin.bind("<Return>", lambda e: self._save_local_settings())
+
+        # Checkboxes row
+        cb_fr = tk.Frame(parent, bg=C["bg_sidebar"])
+        cb_fr.pack(fill="x", pady=(4, 4))
+
+        self._auto_load_var = tk.BooleanVar(value=os.getenv("LM_STUDIO_AUTO_LOAD", "1") == "1")
+        auto_cb = tk.Checkbutton(cb_fr, text="Auto-load",
+                                 variable=self._auto_load_var,
+                                 font=FONTS["small"], fg=C["text_hint"],
+                                 bg=C["bg_sidebar"], selectcolor=C["bg_input"],
+                                 activebackground=C["bg_sidebar"],
+                                 activeforeground=C["text_primary"],
+                                 command=self._save_local_settings)
+        auto_cb.pack(side="left")
+
+        self._flash_attn_var = tk.BooleanVar(value=os.getenv("LM_STUDIO_FLASH_ATTN", "1") == "1")
+        flash_cb = tk.Checkbutton(cb_fr, text="Flash Attn",
+                                  variable=self._flash_attn_var,
+                                  font=FONTS["small"], fg=C["text_hint"],
+                                  bg=C["bg_sidebar"], selectcolor=C["bg_input"],
+                                  activebackground=C["bg_sidebar"],
+                                  activeforeground=C["text_primary"],
+                                  command=self._save_local_settings)
+        flash_cb.pack(side="left", padx=(8, 0))
+
+    def _populate_gpus(self, gpus):
+        """Populate GPU combobox (called on main thread)."""
+        self._gpu_combo["values"] = gpus
+        saved = self._gpu_var.get()
+        if saved and saved in gpus:
+            self._gpu_combo.set(saved)
+        elif len(gpus) > 1:
+            # Default to first real GPU
+            self._gpu_combo.current(1)
+            self._gpu_var.set(gpus[1])
+        elif gpus:
+            self._gpu_combo.current(0)
+        # Persist the selection so bridge can read it
+        self._save_local_settings()
+
+    def _save_local_settings(self):
+        """Persist local model settings to environment and .env file."""
+        settings = {
+            "LM_STUDIO_GPU": self._gpu_var.get(),
+            "LM_STUDIO_CTX": str(self._ctx_var.get()),
+            "LM_STUDIO_TEMP": f"{self._temp_var.get():.1f}",
+            "LM_STUDIO_TOP_P": f"{self._topp_var.get():.2f}",
+            "LM_STUDIO_AUTO_LOAD": "1" if self._auto_load_var.get() else "0",
+            "LM_STUDIO_FLASH_ATTN": "1" if self._flash_attn_var.get() else "0",
+        }
+        for k, v in settings.items():
+            os.environ[k] = v
+
+        # Persist to .env
+        PROJECT_ROOT = Path(__file__).parent.parent
+        env_path = PROJECT_ROOT / ".env"
+        if env_path.exists():
+            try:
+                content = env_path.read_text(encoding="utf-8")
+                for k, v in settings.items():
+                    pattern = rf"^{k}=.*$"
+                    replacement = f"{k}={v}"
+                    if re.search(pattern, content, re.MULTILINE):
+                        content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
+                    else:
+                        content = content.rstrip("\n") + f"\n{replacement}\n"
+                env_path.write_text(content, encoding="utf-8")
+            except Exception:
+                pass
+
+    def _get_gpu_index(self) -> Optional[int]:
+        """Parse GPU index from the GPU combobox selection."""
+        val = self._gpu_var.get()
+        if val and val.startswith("GPU "):
+            try:
+                return int(val.split(":")[0].replace("GPU ", ""))
+            except (ValueError, IndexError):
+                pass
+        return None
+
+    def get_local_settings(self) -> dict:
+        """Return current local model settings."""
+        return {
+            "gpu_index": self._get_gpu_index(),
+            "context_length": self._ctx_var.get(),
+            "temperature": self._temp_var.get(),
+            "top_p": self._topp_var.get(),
+            "flash_attention": self._flash_attn_var.get(),
+        }
+
+    def _show_local_settings(self, show: bool):
+        """Show or hide the local model settings panel."""
+        if show:
+            # Insert after model combo, before the separator
+            try:
+                self._local_settings_fr.pack(fill="x", after=self.model_combo.master)
+            except Exception:
+                self._local_settings_fr.pack(fill="x")
+        else:
+            self._local_settings_fr.pack_forget()
+
+    def _show_load_status(self, text: str = ""):
+        """Show or hide the loading status label."""
+        if text:
+            self._load_status_var.set(text)
+            self._load_status_lbl.pack(fill="x", pady=(0, 2))
+        else:
+            self._load_status_var.set("")
+            self._load_status_lbl.pack_forget()
+
+    def _is_local_entry(self, model_id: str) -> bool:
+        """Check if a model_id belongs to the local LM Studio models."""
+        return any(mid == model_id for mid, _, _ in self._lm_studio_models)
+
+    def refresh_models(self):
+        """Probe LM Studio in a background thread and merge local models into the list."""
+        def _probe():
+            local_models = []
+            states = {}
+            try:
+                from gui.lm_studio import LMStudioPanel, LMStudioClient
+                url = LMStudioPanel._resolve_base_url()
+                client = LMStudioClient(base_url=url)
+                if client.is_running():
+                    for m in client.list_models_api():
+                        mid = m.get("id", "")
+                        if mid:
+                            state = m.get("state", "unknown")
+                            states[mid] = state
+                            short = mid.split("/")[-1] if "/" in mid else mid
+                            tag = "\u2713 " if state == "loaded" else ""
+                            local_models.append((mid, f"[Local] {tag}{short}", "LM Studio"))
+            except Exception:
+                pass
+            self._lm_studio_models = local_models
+            self._model_states = states
+            self._all_models = list(self.MODELS) + local_models
+            # Register local model IDs with the bridge for routing
+            if self.on_local_models and local_models:
+                local_ids = [mid for mid, _, _ in local_models]
+                try:
+                    self.after(0, lambda ids=local_ids: self.on_local_models(ids))
+                except Exception:
+                    pass
+            # Update combobox on main thread
+            try:
+                self.after(0, self._update_combobox_values)
+            except Exception:
+                pass
+
+        threading.Thread(target=_probe, daemon=True).start()
 
     def _on_new(self):
         if self.on_new:
@@ -382,11 +642,95 @@ class Sidebar(tk.Frame):
 
     def _on_model_selected(self, event):
         idx = self.model_combo.current()
-        if 0 <= idx < len(self.MODELS):
-            model_id = self.MODELS[idx][0]
+        if 0 <= idx < len(self._all_models):
+            model_id = self._all_models[idx][0]
             self.model_var.set(model_id)
+            is_local = self._is_local_entry(model_id)
+
+            # Show/hide local settings panel
+            self._show_local_settings(is_local)
+
+            if is_local and self._auto_load_var.get():
+                # Always load via SDK to ensure correct GPU placement,
+                # even if the model is already loaded (may be on wrong GPU)
+                self._auto_load_model(model_id)
+                return  # on_model_change called after load completes
             if self.on_model_change:
                 self.on_model_change(model_id)
+
+    def _auto_load_model(self, model_id: str):
+        """Auto-load a local model in background, then fire on_model_change."""
+        if self._loading_model:
+            return
+        self._loading_model = True
+        self._show_load_status("Loading model...")
+        self.model_combo.configure(state="disabled")
+
+        settings = self.get_local_settings()
+
+        def _load():
+            import logging as _log
+            _dbg = _log.getLogger("hermes.autoload")
+            if not _dbg.handlers:
+                _fh = _log.FileHandler("bridge_debug.log", encoding="utf-8")
+                _fh.setFormatter(_log.Formatter("%(asctime)s %(message)s"))
+                _dbg.addHandler(_fh)
+                _dbg.setLevel(_log.DEBUG)
+
+            success = False
+            error_msg = ""
+            _dbg.debug("auto-load START model=%r gpu=%r ctx=%r",
+                       model_id, settings["gpu_index"], settings["context_length"])
+            try:
+                from gui.lm_studio import LMStudioPanel, LMStudioClient
+                url = LMStudioPanel._resolve_base_url()
+                client = LMStudioClient(base_url=url)
+                if not client.connect_sdk():
+                    error_msg = "LM Studio SDK not available. Load the model manually in LM Studio."
+                    _dbg.debug("auto-load SDK connect FAILED")
+                else:
+                    _dbg.debug("auto-load SDK connected, calling load_model...")
+                    client.load_model(
+                        model_path=model_id,
+                        gpu_index=settings["gpu_index"],
+                        context_length=settings["context_length"],
+                        flash_attention=settings.get("flash_attention", True),
+                    )
+                    success = True
+                    _dbg.debug("auto-load SUCCESS")
+            except Exception as e:
+                error_msg = str(e)
+                _dbg.error("auto-load EXCEPTION: %s", error_msg)
+
+            # Back to main thread
+            try:
+                self.after(0, lambda: self._on_auto_load_complete(model_id, success, error_msg))
+            except Exception:
+                pass
+
+        threading.Thread(target=_load, daemon=True).start()
+
+    def _on_auto_load_complete(self, model_id: str, success: bool, error: str):
+        """Handle auto-load result on main thread."""
+        self._loading_model = False
+        self.model_combo.configure(state="readonly")
+
+        if success:
+            self._show_load_status("\u2713 Loaded")
+            self._model_states[model_id] = "loaded"
+            self.after(500, self.refresh_models)
+            self.after(1500, lambda: self._show_load_status(""))
+        else:
+            short_err = error[:80] if error else "Unknown error"
+            self._show_load_status(f"\u2717 {short_err}")
+            self.after(5000, lambda: self._show_load_status(""))
+
+        # Notify HermesGUI of load result
+        if self.on_auto_load:
+            self.on_auto_load(model_id, success, error)
+        # Always switch to the model (user may have loaded it manually)
+        if self.on_model_change:
+            self.on_model_change(model_id)
 
     def _load_sessions(self):
         """Load recent sessions from SessionDB."""
@@ -809,6 +1153,9 @@ class HermesGUI:
         )
         self.thinking_widget = None
 
+        # Validate startup model (local model + LM Studio check)
+        self.bridge._validate_startup_model()
+
         self._build_menu()
         self._build_layout()
 
@@ -820,6 +1167,10 @@ class HermesGUI:
         model = self.bridge.get_model()
         self.status_bar.set_model(model)
         self.sidebar.set_model(model)
+
+        # Show local settings if current model is local
+        if self.bridge._is_local_model(model):
+            self.sidebar._show_local_settings(True)
 
         # Show context-aware welcome message
         has_key = bool(self.bridge.get_api_key())
@@ -842,6 +1193,15 @@ class HermesGUI:
                 "  \u2022 How do I use local models?\n"
                 "  \u2022 What can Hermes do?\n\n"
                 "Or go to File > API Key Setup to connect an AI model.",
+                "system"
+            )
+
+        # Notify user if we fell back from a local model
+        if self.bridge._startup_fallback:
+            orig = getattr(self.bridge, '_startup_original_model', 'local model')
+            self._add_msg(
+                f"LM Studio not detected. Local model \"{orig}\" unavailable.\n"
+                f"Using {model} instead. Start LM Studio and select your local model from the dropdown to switch back.",
                 "system"
             )
 
@@ -906,7 +1266,9 @@ class HermesGUI:
         # Sidebar
         self.sidebar = Sidebar(main, on_new=self._new_chat,
                                on_model_change=self._on_model_change,
-                               on_session_select=self._on_session_select)
+                               on_session_select=self._on_session_select,
+                               on_local_models=self._on_local_models_discovered,
+                               on_auto_load=self._on_auto_load_status)
         self.sidebar.pack(side="left", fill="y")
 
         # Vertical separator
@@ -1208,16 +1570,28 @@ class HermesGUI:
         self.input_text.focus_set()
         self.sidebar.refresh_sessions()
 
+    def _on_local_models_discovered(self, model_ids):
+        """Called when sidebar discovers local models from LM Studio."""
+        self.bridge.register_local_models(model_ids)
+
+    def _on_auto_load_status(self, model_id, success, error):
+        """Called when a local model auto-load completes."""
+        if success:
+            self._add_msg(f"Model loaded: {model_id}", "system")
+        else:
+            self._add_msg(f"Failed to load {model_id}: {error}", "error")
+
     def _on_model_change(self, model_id):
         """Called when user picks a model from the sidebar dropdown."""
         self.bridge.set_model(model_id)
-        self.status_bar.set_model(model_id)
-        # Show friendly name
-        for mid, name, _ in Sidebar.MODELS:
+        # Show friendly name in status bar
+        display = model_id
+        for mid, name, note in self.sidebar._all_models:
             if mid == model_id:
-                self._add_msg(f"Switched to {name}. Click '+ New Chat' to use it.", "system")
-                return
-        self._add_msg(f"Switched to {model_id}. Click '+ New Chat' to use it.", "system")
+                display = name
+                break
+        self.status_bar.set_model(display)
+        self._add_msg(f"Switched to {display}. Click '+ New Chat' to use it.", "system")
 
     def _on_session_select(self, session_id):
         """Load a past session into the chat view."""
@@ -1295,19 +1669,25 @@ class HermesGUI:
 
     def _on_lm_studio_ready(self, base_url, model_id):
         """Switch Hermes to use LM Studio as the LLM provider."""
-        # Set environment for the agent
-        os.environ["OPENAI_BASE_URL"] = base_url
+        # Ensure /v1 suffix for OpenAI SDK compatibility
+        url = base_url.rstrip("/")
+        if not url.endswith("/v1"):
+            url += "/v1"
+
+        # Set the LM Studio URL BEFORE set_model so routing works correctly
+        self.bridge._lm_studio_base_url = url
         if model_id:
+            self.bridge.register_local_models(
+                list(self.bridge._known_local_models | {model_id})
+            )
             os.environ["LLM_MODEL"] = model_id
             self.bridge.set_model(model_id)
-            self.status_bar.set_model(f"LM Studio: {model_id.split('/')[-1]}")
+            short = model_id.split("/")[-1] if "/" in model_id else model_id
+            self.status_bar.set_model(f"LM Studio: {short}")
             self.sidebar.set_model(model_id)
 
         # Force agent recreation with new endpoint
         self.bridge.agent = None
-
-        # Update agent bridge to use custom base URL
-        self.bridge._lm_studio_base_url = base_url
 
         self._add_msg(
             f"Switched to LM Studio (local model).\n"
