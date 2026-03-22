@@ -663,8 +663,8 @@ EMBED_SCHEMA = {
         "type": "object",
         "properties": {
             "text": {
-                "type": ["string", "array"],
-                "description": "Text or array of texts to embed.",
+                "type": "string",
+                "description": "Text to embed. For multiple texts, separate with newlines.",
             },
             "model": {
                 "type": "string",

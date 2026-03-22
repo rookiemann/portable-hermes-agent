@@ -214,9 +214,8 @@ def prompt(question: str, default: str = None, password: bool = False) -> str:
         display = f"{question}: "
 
     try:
-        if password:
+        if password and sys.platform != "win32":
             import getpass
-
             value = getpass.getpass(color(display, Colors.YELLOW))
         else:
             value = input(color(display, Colors.YELLOW))

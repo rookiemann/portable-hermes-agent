@@ -4490,7 +4490,25 @@ class HermesCLI:
             # an empty final_response mean the agent couldn't produce a usable answer.
             if result and (result.get("failed") or result.get("partial")) and not response:
                 error_detail = result.get("error", "Unknown error")
-                response = f"Error: {error_detail}"
+                # Translate common API errors into plain language
+                error_lower = error_detail.lower()
+                if "401" in error_detail or "unauthorized" in error_lower:
+                    response = (
+                        "Your API key isn't working. This usually means:\n"
+                        "  - The key is missing or expired\n"
+                        "  - The key is for a different service\n\n"
+                        "Run 'hermes setup' to configure your API key."
+                    )
+                elif "429" in error_detail or "rate" in error_lower:
+                    response = "The AI service is busy or you've hit a rate limit. Wait a moment and try again."
+                elif "403" in error_detail or "forbidden" in error_lower:
+                    response = "Access denied. Your API key may not have permission for this model. Try 'hermes model' to pick a different one."
+                elif "timeout" in error_lower or "timed out" in error_lower:
+                    response = "The request timed out. Check your internet connection and try again."
+                elif "connection" in error_lower:
+                    response = "Couldn't connect to the AI service. Check your internet connection."
+                else:
+                    response = f"Something went wrong: {error_detail}\n\nTry 'hermes doctor' to diagnose the issue."
                 # Stop continuous voice mode on persistent errors (e.g. 429 rate limit)
                 # to avoid an infinite error → record → error loop
                 if self._voice_continuous:
