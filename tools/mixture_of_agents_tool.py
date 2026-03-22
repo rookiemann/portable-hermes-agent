@@ -280,8 +280,13 @@ async def mixture_of_agents_tool(
     
     try:
         logger.info("Starting Mixture-of-Agents processing...")
+
+        # Validate inputs before making any API calls
+        if not user_prompt or not user_prompt.strip():
+            raise ValueError("user_prompt is required and cannot be empty")
+
         logger.info("Query: %s", user_prompt[:100])
-        
+
         # Validate API key availability
         if not os.getenv("OPENROUTER_API_KEY"):
             raise ValueError("OPENROUTER_API_KEY environment variable not set")

@@ -268,6 +268,31 @@ def _extract_fenced_output(raw: str) -> str:
     return raw[start:last]
 
 
+def _win_to_bash_path(p: str) -> str:
+    """Convert Windows path to Git Bash format (E:\\foo → /e/foo)."""
+    p = p.replace("\\", "/")
+    if len(p) >= 2 and p[1] == ":":
+        return "/" + p[0].lower() + p[2:]
+    return p
+
+
+def _get_embedded_python_path_prefix() -> str:
+    """Build a shell prefix that prepends Hermes' embedded Python to PATH.
+
+    Returns an empty string if no embedded Python directory exists.
+    This is injected into the fenced command (not just the env dict) because
+    Git Bash's login shell (-lic) rebuilds PATH from /etc/profile.
+    """
+    hermes_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    embedded_python = os.path.join(hermes_root, "python_embedded")
+    embedded_scripts = os.path.join(embedded_python, "Scripts")
+    if not os.path.isdir(embedded_python):
+        return ""
+    if _IS_WINDOWS:
+        return f"export PATH={_win_to_bash_path(embedded_python)}:{_win_to_bash_path(embedded_scripts)}:$PATH; "
+    return f"export PATH={embedded_python}:{embedded_scripts}:$PATH; "
+
+
 class LocalEnvironment(BaseEnvironment):
     """Run commands directly on the host machine.
 
@@ -308,15 +333,6 @@ class LocalEnvironment(BaseEnvironment):
             # fish, zsh, or another shell with incompatible syntax.
             # The -lic flags source rc files so tools like nvm/pyenv work.
             user_shell = _find_bash()
-            # Wrap with output fences so we can later extract the real
-            # command output and discard shell init/exit noise.
-            fenced_cmd = (
-                f"printf '{_OUTPUT_FENCE}';"
-                f" {exec_command};"
-                f" __hermes_rc=$?;"
-                f" printf '{_OUTPUT_FENCE}';"
-                f" exit $__hermes_rc"
-            )
             # Ensure PATH always includes standard dirs — systemd services
             # and some terminal multiplexers inherit a minimal PATH.
             _SANE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -328,6 +344,24 @@ class LocalEnvironment(BaseEnvironment):
             existing_path = run_env.get("PATH", "")
             if "/usr/bin" not in existing_path.split(":"):
                 run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
+
+            # Prepend Hermes' embedded Python to PATH so `python` and `pip`
+            # resolve to the same interpreter Hermes runs on.  Without this,
+            # `pip install X` installs to a system Python that Hermes doesn't use.
+            # This must be done inside the command (not just run_env) because
+            # Git Bash's login shell (-lic) rebuilds PATH from /etc/profile.
+            _path_prefix = _get_embedded_python_path_prefix()
+
+            # Wrap with output fences so we can later extract the real
+            # command output and discard shell init/exit noise.
+            fenced_cmd = (
+                f"{_path_prefix}"
+                f"printf '{_OUTPUT_FENCE}';"
+                f" {exec_command};"
+                f" __hermes_rc=$?;"
+                f" printf '{_OUTPUT_FENCE}';"
+                f" exit $__hermes_rc"
+            )
 
             proc = subprocess.Popen(
                 [user_shell, "-lic", fenced_cmd],

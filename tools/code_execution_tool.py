@@ -36,7 +36,8 @@ from typing import Any, Dict, List, Optional
 # Availability gate: UDS requires a POSIX OS
 logger = logging.getLogger(__name__)
 
-SANDBOX_AVAILABLE = sys.platform != "win32"
+# Windows lacks AF_UNIX but we use TCP localhost as a fallback
+SANDBOX_AVAILABLE = True
 
 # The 7 tools allowed inside the sandbox. The intersection of this list
 # and the session's enabled tools determines which stubs are generated.
@@ -58,7 +59,7 @@ MAX_STDERR_BYTES = 10_000    # 10 KB
 
 
 def check_sandbox_requirements() -> bool:
-    """Code execution sandbox requires a POSIX OS for Unix domain sockets."""
+    """Code execution sandbox is available on all platforms (TCP fallback on Windows)."""
     return SANDBOX_AVAILABLE
 
 
@@ -179,8 +180,15 @@ def retry(fn, max_attempts=3, delay=2):
 def _connect():
     global _sock
     if _sock is None:
-        _sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        _sock.connect(os.environ["HERMES_RPC_SOCKET"])
+        _rpc_addr = os.environ.get("HERMES_RPC_SOCKET", "")
+        if _rpc_addr.startswith("tcp:"):
+            # Windows TCP fallback: "tcp:host:port"
+            _, host, port = _rpc_addr.split(":")
+            _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _sock.connect((host, int(port)))
+        else:
+            _sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            _sock.connect(_rpc_addr)
         _sock.settimeout(300)
     return _sock
 
@@ -363,7 +371,7 @@ def execute_code(
     """
     if not SANDBOX_AVAILABLE:
         return json.dumps({
-            "error": "execute_code is not available on Windows. Use normal tool calls instead."
+            "error": "execute_code sandbox is not available in this environment."
         })
 
     if not code or not code.strip():
@@ -386,11 +394,15 @@ def execute_code(
 
     # --- Set up temp directory with hermes_tools.py and script.py ---
     tmpdir = tempfile.mkdtemp(prefix="hermes_sandbox_")
-    # Use /tmp on macOS to avoid the long /var/folders/... path that pushes
+    # On Windows, AF_UNIX is unavailable so we use TCP localhost instead.
+    # On macOS, use /tmp to avoid the long /var/folders/... path that pushes
     # Unix domain socket paths past the 104-byte macOS AF_UNIX limit.
-    # On Linux, tempfile.gettempdir() already returns /tmp.
-    _sock_tmpdir = "/tmp" if sys.platform == "darwin" else tempfile.gettempdir()
-    sock_path = os.path.join(_sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
+    _use_tcp = _IS_WINDOWS or not hasattr(socket, "AF_UNIX")
+    if not _use_tcp:
+        _sock_tmpdir = "/tmp" if sys.platform == "darwin" else tempfile.gettempdir()
+        sock_path = os.path.join(_sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
+    else:
+        sock_path = None  # will be set after binding to a random port
 
     tool_call_log: list = []
     tool_call_counter = [0]  # mutable so the RPC thread can increment
@@ -404,13 +416,28 @@ def execute_code(
         with open(os.path.join(tmpdir, "hermes_tools.py"), "w") as f:
             f.write(tools_src)
 
-        # Write the user's script
+        # Write the user's script with sys.path bootstrap.
+        # Embedded Python on Windows ignores PYTHONPATH (controlled by ._pth file),
+        # so we inject tmpdir and hermes root into sys.path at the top of the script.
+        _hermes_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path_bootstrap = (
+            f"import sys as _sys\n"
+            f"_sys.path.insert(0, {tmpdir!r})\n"
+            f"_sys.path.insert(1, {_hermes_root!r})\n"
+        )
         with open(os.path.join(tmpdir, "script.py"), "w") as f:
-            f.write(code)
+            f.write(path_bootstrap + code)
 
-        # --- Start UDS server ---
-        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server_sock.bind(sock_path)
+        # --- Start RPC server (UDS on POSIX, TCP localhost on Windows) ---
+        if _use_tcp:
+            server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_sock.bind(("127.0.0.1", 0))  # random free port
+            _tcp_port = server_sock.getsockname()[1]
+            sock_path = f"tcp:127.0.0.1:{_tcp_port}"
+        else:
+            server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server_sock.bind(sock_path)
         server_sock.listen(1)
 
         rpc_thread = threading.Thread(
@@ -429,7 +456,12 @@ def execute_code(
         # generated scripts. The child accesses tools via RPC, not direct API.
         _SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
                               "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME",
-                              "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA")
+                              "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA",
+                              # Windows-specific: needed for socket/subprocess/DLL loading
+                              "SYSTEMROOT", "SYSTEM", "COMSPEC", "WINDIR",
+                              "APPDATA", "LOCALAPPDATA", "PROGRAMFILES",
+                              "COMMONPROGRAMFILES", "PROCESSOR_", "NUMBER_OF_",
+                              "OS", "PATHEXT", "USERDOMAIN", "COMPUTERNAME")
         _SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
                               "PASSWD", "AUTH")
         child_env = {}
@@ -442,9 +474,11 @@ def execute_code(
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
         # Ensure the hermes-agent root is importable in the sandbox so
         # modules like minisweagent_path are available to child scripts.
+        # Also add tmpdir so hermes_tools.py (the generated stub) is importable —
+        # embedded Python on Windows doesn't add cwd to sys.path by default.
         _hermes_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         _existing_pp = child_env.get("PYTHONPATH", "")
-        child_env["PYTHONPATH"] = _hermes_root + (os.pathsep + _existing_pp if _existing_pp else "")
+        child_env["PYTHONPATH"] = tmpdir + os.pathsep + _hermes_root + (os.pathsep + _existing_pp if _existing_pp else "")
         # Inject user's configured timezone so datetime.now() in sandboxed
         # code reflects the correct wall-clock time.
         _tz_name = os.getenv("HERMES_TIMEZONE", "").strip()
@@ -617,10 +651,11 @@ def execute_code(
             shutil.rmtree(tmpdir, ignore_errors=True)
         except Exception as e:
             logger.debug("Could not clean temp dir: %s", e, exc_info=True)
-        try:
-            os.unlink(sock_path)
-        except OSError as e:
-            logger.debug("Could not remove socket file: %s", e, exc_info=True)
+        if sock_path and not sock_path.startswith("tcp:"):
+            try:
+                os.unlink(sock_path)
+            except OSError as e:
+                logger.debug("Could not remove socket file: %s", e, exc_info=True)
 
 
 def _kill_process_group(proc, escalate: bool = False):

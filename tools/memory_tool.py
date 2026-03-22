@@ -485,6 +485,17 @@ MEMORY_SCHEMA = {
 # --- Registry ---
 from tools.registry import registry
 
+# Fallback store for standalone dispatch (e.g. smoke tests, execute_code sandbox).
+# The live AIAgent overrides this via the store= kwarg.
+_default_memory_store = None
+
+def _get_default_memory_store():
+    global _default_memory_store
+    if _default_memory_store is None:
+        _default_memory_store = MemoryStore()
+        _default_memory_store.load_from_disk()
+    return _default_memory_store
+
 registry.register(
     name="memory",
     toolset="memory",
@@ -494,7 +505,7 @@ registry.register(
         target=args.get("target", "memory"),
         content=args.get("content"),
         old_text=args.get("old_text"),
-        store=kw.get("store")),
+        store=kw.get("store") or _get_default_memory_store()),
     check_fn=check_memory_requirements,
 )
 

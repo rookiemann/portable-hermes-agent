@@ -377,7 +377,9 @@ from tools.environments.modal import ModalEnvironment as _ModalEnvironment
 
 
 # Tool description for LLM
-TERMINAL_TOOL_DESCRIPTION = """Execute shell commands on a Linux environment. Filesystem persists between calls.
+_PLATFORM_DESC = "Windows (Git Bash)" if platform.system() == "Windows" else "Linux"
+
+TERMINAL_TOOL_DESCRIPTION = f"""Execute shell commands on a {_PLATFORM_DESC} environment. Filesystem persists between calls.
 
 Do NOT use cat/head/tail to read files — use read_file instead.
 Do NOT use grep/rg/find to search — use search_files instead.
