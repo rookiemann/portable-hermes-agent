@@ -1,6 +1,6 @@
 # Portable Hermes Agent
 
-**Portable AI agent desktop for Windows** — 46+ tools, GUI, local models via LM Studio, TTS, Music, ComfyUI, workflows, tool maker. No install. No Docker. No admin rights.
+**Portable AI agent desktop for Windows** — 100 tools, GUI, local models via LM Studio, TTS, Music, ComfyUI, workflows, tool maker. No install. No Docker. No admin rights.
 
 Built on [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) (MIT License) with extensive customization for non-technical users.
 
@@ -15,7 +15,7 @@ Built on [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agen
 - API key setup wizard with individual service configuration
 - Permissions panel with granular control over file, network, and system access
 
-### 46+ Tools Across 11 Toolsets
+### 100 Tools Across 20+ Toolsets
 
 | Toolset | Tools | What It Does |
 |---------|-------|-------------|
@@ -126,7 +126,7 @@ Agent Bridge (threading, sessions)
  v
 AIAgent (run_agent.py)
  |
- +-- Tool Registry (46+ tools)
+ +-- Tool Registry (100 tools)
  |    +-- LM Studio tools (SDK + HTTP)
  |    +-- Extension tools (Music, TTS, ComfyUI)
  |    +-- Workflow engine
