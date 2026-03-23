@@ -58,11 +58,20 @@ for line in text.split("\n"):
             # Skip separator rows like |---|---|
             if s.replace("|", "").replace("-", "").replace(" ", "") == "":
                 continue
-            pdf.set_font("Helvetica", "", 8)
-            # Truncate long table rows
-            if len(clean) > 130:
-                clean = clean[:127] + "..."
-            pdf.multi_cell(0, 4, clean)
+            cells = [c.strip() for c in clean.split("|") if c.strip()]
+            if not cells:
+                continue
+            # Format: "first_cell -- rest" for readability
+            pdf.set_font("Helvetica", "", 9)
+            if len(cells) >= 2:
+                label = cells[0]
+                rest = " | ".join(cells[1:])
+                row_text = f"  {label}  --  {rest}"
+            else:
+                row_text = "  " + cells[0]
+            if len(row_text) > 120:
+                row_text = row_text[:117] + "..."
+            pdf.multi_cell(0, 5, row_text)
         elif s.startswith(("- ", "* ")):
             pdf.set_font("Helvetica", "", 10)
             bullet = s.lstrip("-* ").replace("**", "").replace("`", "")
