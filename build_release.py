@@ -4,7 +4,7 @@ import zipfile
 import sys
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-VERSION = "1.1.0"
+VERSION = "0.4.0"
 ZIP_NAME = f"portable-hermes-agent-v{VERSION}.zip"
 ZIP_PATH = os.path.join(os.path.dirname(PROJECT_ROOT), ZIP_NAME)
 

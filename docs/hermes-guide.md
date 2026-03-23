@@ -204,15 +204,20 @@ This is the main workspace. You type messages at the bottom and Hermes responds 
 - Requires a vision-capable model (Gemini, GPT-4o, or local LLaVA/Moondream)
 
 **Message types you'll see:**
-- **Your messages** — shown on the right side in a different color
-- **Hermes responses** — shown on the left
-- **Tool calls** — shown as collapsed cards you can expand to see details
-- **Thinking** — animated indicator while Hermes is working
+- **Your messages** — shown on the right side in a blue-tinted card
+- **Hermes responses** — shown on the left in a green-tinted card, streamed token-by-token in real time
+- **Tool calls** — shown as compact cards showing the tool name and arguments
 - **System messages** — gray informational messages
+
+**Streaming responses:**
+- Hermes streams responses in real time — you see each word as it's generated
+- A blinking cursor shows the response is still being generated
+- The chat auto-scrolls as new text arrives
 
 **Stopping a response:**
 - Press **Escape** or click the **Stop** button to interrupt Hermes mid-response
-- Useful if it's going down the wrong path or taking too long
+- The partial response is kept and a "Generation stopped" message appears
+- You can immediately send a new message
 
 ### The Sidebar
 
@@ -221,9 +226,9 @@ The sidebar shows your conversation history. Each conversation is a "session."
 - **New Chat** — Click the + button or press **Ctrl+N**
 - **Resume a conversation** — Click any session in the list
 - **Rename a session** — Right-click > Rename
-- **Delete a session** — Right-click > Delete (confirmation dialog will appear)
+- **Delete a session** — Hover to reveal the X button, click to delete (confirmation dialog will appear)
 
-Sessions are saved automatically. You can close and reopen Hermes without losing conversations.
+Sessions are saved automatically. You can close and reopen Hermes without losing conversations. Deleting sessions removes the entry instantly and cleans up the database in the background.
 
 ### The Menu Bar
 
@@ -233,11 +238,11 @@ Sessions are saved automatically. You can close and reopen Hermes without losing
 - **Settings** (Ctrl+,) — Model selection, API keys
 - **Quit** — Close Hermes
 
-**Tools menu:**
-- **Permissions** — Control what Hermes can do on your computer
-- **Extensions** — Install and manage add-on modules (TTS, Music, ComfyUI)
-- **LM Studio** — Visual model manager for local AI models
+**View menu:**
+- **LM Studio (Local Models)** — Visual model manager for local AI models
 - **Skills Browser** — Browse and install skill packages
+- **Extensions** — Install and manage add-on modules (TTS, Music, ComfyUI)
+- **Toggle Sidebar** — Show or hide the sidebar
 
 **Help menu:**
 - **About** — Version information
@@ -350,14 +355,16 @@ LM Studio is a free application that lets you run AI models directly on your com
 
 ### The LM Studio Panel
 
-Open via **Tools > LM Studio** in the menu bar. The panel shows:
+Open via **View > LM Studio (Local Models)** in the menu bar. The panel shows:
 
-- **Status indicator** — green dot = LM Studio is running
-- **Model browser** — list of all downloaded models
+- **Endpoint field** — the LM Studio server address (default `http://localhost:1234`), with a Connect button to change it
+- **Status indicator** — green dot = LM Studio is running and connected
+- **Model browser** — list of all downloaded models with display names
 - **GPU selector** — choose which GPU to load the model on
-- **Context length slider** — how much text the model can remember (512 to 131,072 tokens)
-- **Load/Unload buttons** — manage what's in GPU memory
-- **Use for Chat** — switch Hermes to use this model
+- **Context length slider** — minimum 32,768 tokens (Hermes needs ~26K for its tool definitions)
+- **Load Model / Cancel Load** — load a model onto your GPU, or cancel a load in progress
+- **Unload** — free GPU memory
+- **Use for Chat** — switch Hermes to use the loaded model for all conversations
 
 ### Step-by-Step: Loading Your First Local Model
 
@@ -370,8 +377,8 @@ Open via **Tools > LM Studio** in the menu bar. The panel shows:
 4. **Wait for status** — the green dot should appear showing LM Studio is connected
 5. **Select your model** from the model browser list
 6. **Choose your GPU** — if you have multiple GPUs, pick the one with more VRAM
-7. **Set context length** — start with 4096 (uses less memory) or 8192 (remembers more)
-8. **Click Load** — the model loads into your GPU memory
+7. **Set context length** — leave at 32,768 (minimum required) or increase if your GPU has room
+8. **Click Load Model** — the model loads into your GPU memory (click Cancel Load if it hangs)
 9. **Click Use for Chat** — Hermes switches to using this model
 10. **Start chatting!** — your messages now go to the local model
 
@@ -419,17 +426,18 @@ When LM Studio is running, these tools become available:
 
 ### Switching Between Cloud and Local
 
-You can switch at any time:
+You can switch at any time through the UI:
 
 **To local model:**
-Say: "Switch to LM Studio" or "Use my local model"
-Hermes will set `OPENAI_BASE_URL` to your LM Studio server.
+1. Open **View > LM Studio (Local Models)**
+2. Load your model and click **Use for Chat**
+3. Hermes automatically switches to local mode
 
 **To cloud (OpenRouter):**
-Say: "Switch to OpenRouter" or "Use cloud model"
-Hermes will set `OPENAI_BASE_URL` back to OpenRouter.
+- Select any cloud model from the sidebar dropdown (e.g. Gemini Flash, Claude Sonnet)
+- Hermes automatically switches back to OpenRouter
 
-Or use **File > Settings** to change the model and provider manually.
+The switch is instant — no need to change settings or edit config files. Hermes tracks which provider is active internally.
 
 ### Troubleshooting LM Studio
 
@@ -990,30 +998,33 @@ Workflows are saved as JSON files in the `workflows/` directory.
 
 ### Environment Variables (.env file)
 
-The `.env` file in the Hermes directory contains all configuration. You can edit it directly or use the GUI.
+The `.env` file is for **API keys only**. Model selection, LM Studio settings, GPU preferences, and other runtime state are managed through the GUI — not through environment variables.
 
-**Core settings:**
+**API keys:**
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `LLM_MODEL` | The AI model to use | `google/gemini-2.5-flash` |
-| `OPENAI_BASE_URL` | API endpoint URL | `https://openrouter.ai/api/v1` |
-| `OPENROUTER_API_KEY` | OpenRouter API key | `sk-or-v1-...` |
+| `OPENROUTER_API_KEY` | OpenRouter API key (required for cloud models) | `sk-or-v1-...` |
+| `FIRECRAWL_API_KEY` | Web search and page reading | |
+| `SERPER_API_KEY` | Google search via Serper.dev | |
+| `FAL_KEY` | Image generation (FAL.ai) | |
+| `BROWSERBASE_API_KEY` | Cloud browser automation | |
+| `GITHUB_TOKEN` | Skills Hub (higher rate limits) | |
 
-**Optional API keys:**
-| Variable | Description |
-|----------|-------------|
-| `FIRECRAWL_API_KEY` | Web search and page reading |
-| `SERPER_API_KEY` | Google search via Serper.dev |
-| `FAL_KEY` | Image generation (FAL.ai) |
-| `BROWSERBASE_API_KEY` | Cloud browser automation |
-| `GITHUB_TOKEN` | Skills Hub (higher rate limits) |
-
-**Extension ports:**
+**Extension ports (optional):**
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TTS_SERVER_URL` | `http://localhost:8200` | TTS server address |
 | `MUSIC_SERVER_URL` | `http://localhost:9150` | Music server address |
 | `COMFYUI_URL` | `http://localhost:8188` | ComfyUI address |
+
+### Runtime Settings (managed by GUI)
+
+These settings are selected through the interface and do not need to be edited manually:
+
+- **Active model** — selected from the sidebar dropdown or LM Studio panel
+- **Cloud vs Local provider** — automatically set when you pick a cloud model or click "Use for Chat" in LM Studio
+- **LM Studio endpoint** — configured in the LM Studio panel's Endpoint field
+- **GPU selection, context length, temperature** — configured in the sidebar's local model settings or the LM Studio panel
 
 ---
 
@@ -1031,7 +1042,7 @@ The `.env` file in the Hermes directory contains all configuration. You can edit
 | **GGUF** | A file format for AI models that run on your computer. Like .mp3 is for music, .gguf is for AI models. |
 | **Quantization** | Compression for AI models. Q4 = very compressed (small, fast), Q8 = light compression (bigger, more accurate). Like JPEG quality settings for images. |
 | **Inference** | When the AI generates a response. "Running inference" = "the AI is thinking." |
-| **Tool** | A specific action Hermes can take — like searching the web, reading a file, or generating an image. Hermes has 46+ tools. |
+| **Tool** | A specific action Hermes can take — like searching the web, reading a file, or generating an image. Hermes has 100 tools. |
 | **Toolset** | A group of related tools. The "web" toolset includes web_search and web_extract. |
 | **Workflow** | A saved sequence of tool calls that run automatically. Like a macro or recipe. |
 | **Extension** | An add-on module that gives Hermes new abilities (TTS, Music, Image Generation). Each is a separate program that runs alongside Hermes. |
