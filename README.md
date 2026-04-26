@@ -35,13 +35,13 @@ Plus all built-in hermes-agent tools: web search, file operations, browser autom
 
 ### Extension Modules
 
-Three portable AI generation servers from [rookiemann](https://github.com/rookiemann):
+Three portable AI generation servers from [aivrar](https://github.com/aivrar):
 
 | Extension | Port | Models | GPU |
 |-----------|------|--------|-----|
-| **[TTS Server](https://github.com/rookiemann/portable-tts-server)** | 8200 | Kokoro, XTTS, Dia, Bark, Fish, + 5 more | 4 GB+ |
-| **[Music Server](https://github.com/rookiemann/portable-music-server)** | 9150 | MusicGen, Stable Audio, ACE-Step, Riffusion | 4 GB+ |
-| **[ComfyUI](https://github.com/rookiemann/comfyui-portable-installer)** | 5000 | SD 1.5, SDXL, Flux, 100+ registry models | 6 GB+ |
+| **[TTS Server](https://github.com/aivrar/portable-tts-server)** | 8200 | Kokoro, XTTS, Dia, Bark, Fish, + 5 more | 4 GB+ |
+| **[Music Server](https://github.com/aivrar/portable-music-server)** | 9150 | MusicGen, Stable Audio, ACE-Step, Riffusion | 4 GB+ |
+| **[ComfyUI](https://github.com/aivrar/comfyui-portable-installer)** | 5000 | SD 1.5, SDXL, Flux, 100+ registry models | 6 GB+ |
 
 Each extension auto-installs on first use. No system dependencies.
 
@@ -96,7 +96,7 @@ hermes_gui.bat      :: GUI mode
 
 ## Documentation
 
-A searchable user guide is built into the agent — ask it anything or use the `search_guide` tool. The [PDF manual](https://github.com/rookiemann/portable-hermes-agent/releases/latest) is included in every release.
+A searchable user guide is built into the agent — ask it anything or use the `search_guide` tool. The [PDF manual](https://github.com/aivrar/portable-hermes-agent/releases/latest) is included in every release.
 
 Key topics: getting started, API setup, the interface, permissions, LM Studio local models, extensions (TTS/Music/ComfyUI), all 100 tools, custom tool creation, workflows, and a glossary of AI terms.
 
@@ -135,7 +135,7 @@ AIAgent (run_agent.py)
 ## Credits
 
 - **Base framework**: [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) (MIT License)
-- **Extension modules**: [rookiemann](https://github.com/rookiemann) — portable-tts-server, portable-music-server, comfyui-portable-installer
+- **Extension modules**: [aivrar](https://github.com/aivrar) — portable-tts-server, portable-music-server, comfyui-portable-installer
 - **Custom tools, GUI, and integrations**: Built with [Claude Code](https://claude.ai/claude-code)
 
 ---
